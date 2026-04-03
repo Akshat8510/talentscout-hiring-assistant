@@ -1,0 +1,16 @@
+# Local environment variables (IMPORTANT: DO NOT LEAK YOUR API KEY)
+.env
+
+# Python junk
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+
+# Local data (so you don't upload your test candidates)
+data/
+*.json
+
+# Streamlit junk
+.streamlit/
