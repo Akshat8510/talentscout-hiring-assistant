@@ -223,6 +223,10 @@ button[kind="secondary"] {
 # ── Init session ──────────────────────────────────────────────────────────────
 init_session()
 
+# ── Ensure input_key exists in session state ──────────────────────────────────
+if "input_key" not in st.session_state:
+    st.session_state.input_key = 0
+
 # ── Helper: render a single message bubble ────────────────────────────────────
 def render_message(role: str, content: str):
     if role == "assistant":
@@ -303,6 +307,7 @@ if st.session_state.conversation_ended:
     st.markdown('<div class="ts-ended">✅ Interview session complete. Thank you!</div>', unsafe_allow_html=True)
     if st.button("🔄 Start New Interview"):
         reset_session()
+        st.session_state.input_key = 0
         st.rerun()
     st.stop()
 
@@ -310,10 +315,12 @@ if st.session_state.conversation_ended:
 with st.container():
     col1, col2 = st.columns([5, 1])
     with col1:
+        # key changes on every send → forces Streamlit to treat it as a new
+        # widget, which clears the value automatically on rerun
         user_input = st.text_input(
-            label="",
+            label="Message Aria",
             placeholder="Type your response here… (type 'bye' to exit)",
-            key="user_input_field",
+            key=f"user_input_{st.session_state.input_key}",
             label_visibility="collapsed",
         )
     with col2:
@@ -331,14 +338,14 @@ if send and user_input.strip():
         farewell = "Thank you for taking the time to speak with us today! Our recruitment team will review your profile and get back to you within 3–5 business days. Wishing you all the best! 👋"
         st.session_state.messages.append({"role": "assistant", "content": farewell})
         st.session_state.conversation_ended = True
-        # Save whatever we have
         if st.session_state.collected_data and not st.session_state.data_saved:
             st.session_state.collected_data["session_id"] = st.session_state.session_id
             save_candidate(st.session_state.collected_data)
             st.session_state.data_saved = True
+        st.session_state.input_key += 1
         st.rerun()
 
-    # Build message list for API (exclude system, just user/assistant turns)
+    # Build message list for API
     api_messages = [
         {"role": m["role"], "content": m["content"]}
         for m in st.session_state.messages
@@ -356,48 +363,59 @@ if send and user_input.strip():
 
     st.session_state.messages.append({"role": "assistant", "content": reply})
 
-    # ── Heuristic: extract info from assistant messages ──────────────────────
-    # We ask Claude to tag data; here we use a simple keyword scan as a fallback
-    # For robust extraction, a separate extraction call could be used.
+    # ── Strict heuristic: one field per turn based on what bot asked ──────────
+    cd          = st.session_state.collected_data
     reply_lower = reply.lower()
     user_lower  = user_text.lower()
 
-    cd = st.session_state.collected_data
+    # Detect which field the assistant just asked for
+    asked_email    = "email" in reply_lower
+    asked_phone    = "phone" in reply_lower or ("number" in reply_lower and "email" not in reply_lower)
+    asked_location = "located" in reply_lower or "location" in reply_lower or "city" in reply_lower
+    asked_exp      = ("years of" in reply_lower or "experience" in reply_lower) and "tech" not in reply_lower
+    asked_position = "position" in reply_lower or "role" in reply_lower or "applying" in reply_lower
+    asked_tech     = "tech stack" in reply_lower or "technologies" in reply_lower or "framework" in reply_lower
+    asked_name     = (
+        "full name" in reply_lower
+        or ("name" in reply_lower and not asked_email and not asked_phone)
+    )
 
-    # Very light heuristic — if assistant asks about X and user answered
-    if "full name" in reply_lower or ("name" in reply_lower and "Full Name" not in cd):
-        if len(user_text.split()) >= 1 and "@" not in user_text:
-            cd.setdefault("Full Name", user_text)
-
-    if ("email" in reply_lower) and "Email Address" not in cd:
+    # Fill ONLY the one field that was asked — strict elif chain
+    if asked_email and "Email Address" not in cd:
         if "@" in user_text:
             cd["Email Address"] = user_text
 
-    if ("phone" in reply_lower or "number" in reply_lower) and "Phone Number" not in cd:
-        if any(c.isdigit() for c in user_text):
+    elif asked_phone and "Phone Number" not in cd:
+        digits = "".join(c for c in user_text if c.isdigit())
+        if len(digits) >= 6:
             cd["Phone Number"] = user_text
 
-    if ("location" in reply_lower or "city" in reply_lower) and "Current Location" not in cd:
-        if len(user_text.split()) <= 5:
-            cd.setdefault("Current Location", user_text)
+    elif asked_location and "Current Location" not in cd:
+        # Reject pure-digit strings (e.g. phone numbers answered in wrong turn)
+        if not user_text.replace(" ", "").isdigit() and "@" not in user_text:
+            cd["Current Location"] = user_text
 
-    if ("experience" in reply_lower or "years" in reply_lower) and "Years of Experience" not in cd:
+    elif asked_exp and "Years of Experience" not in cd:
         if any(c.isdigit() for c in user_text) or "year" in user_lower:
             cd["Years of Experience"] = user_text
 
-    if ("position" in reply_lower or "role" in reply_lower or "applying" in reply_lower) and "Desired Position(s)" not in cd:
-        cd.setdefault("Desired Position(s)", user_text)
+    elif asked_position and "Desired Position(s)" not in cd:
+        cd["Desired Position(s)"] = user_text
 
-    if ("tech stack" in reply_lower or "technologies" in reply_lower or "framework" in reply_lower) and "Tech Stack" not in cd:
-        cd.setdefault("Tech Stack", user_text)
+    elif asked_tech and "Tech Stack" not in cd:
+        cd["Tech Stack"] = user_text
 
-    # Detect phase transitions
+    elif asked_name and "Full Name" not in cd:
+        if "@" not in user_text and not any(c.isdigit() for c in user_text):
+            cd["Full Name"] = user_text
+
+    # ── Phase transitions ────────────────────────────────────────────────────
     if "Tech Stack" in cd and st.session_state.phase == "info_gathering":
         st.session_state.phase = "tech_questions"
     elif "Full Name" in cd and st.session_state.phase == "greeting":
         st.session_state.phase = "info_gathering"
 
-    # Check if closing
+    # ── Detect closing ───────────────────────────────────────────────────────
     if any(kw in reply_lower for kw in ["next steps", "3–5 business days", "our team will review", "best of luck", "take care"]):
         st.session_state.phase = "closing"
         if st.session_state.collected_data and not st.session_state.data_saved:
@@ -406,10 +424,13 @@ if send and user_input.strip():
             st.session_state.data_saved = True
         st.session_state.conversation_ended = True
 
+    # ── Increment key to clear text input on next render ────────────────────
+    st.session_state.input_key += 1
     st.rerun()
 
 # ── Reset button ──────────────────────────────────────────────────────────────
 st.markdown("<br>", unsafe_allow_html=True)
 if st.button("↺ Reset Interview", help="Clear and start over"):
     reset_session()
+    st.session_state.input_key = 0
     st.rerun()
