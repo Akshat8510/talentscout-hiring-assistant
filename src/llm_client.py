@@ -1,55 +1,84 @@
 import os
-import google.generativeai as genai
+import json
+import re
+from groq import Groq
 from src.prompts import build_system_prompt
 
-def chat(
-    messages: list[dict],
-    collected_data: dict,
-    phase: str,
-) -> str:
-    api_key = os.getenv("GOOGLE_API_KEY")
+def chat(messages, collected_data, phase):
+    api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
-        return "⚠️ Error: GOOGLE_API_KEY not found."
+        raise EnvironmentError("Set GROQ_API_KEY in your .env file.")
     
-    # Configure the API
-    genai.configure(api_key=api_key)
-    
-    # SYSTEM PROMPT
+    client = Groq(api_key=api_key)
     system_instruction = build_system_prompt(collected_data, phase)
-
-    # 🚨 FIX: Using the EXACT model name found in your terminal logs
-    # Your terminal showed 'models/gemini-2.0-flash' is available!
-    model_name = "gemini-2.0-flash" 
-
-    model = genai.GenerativeModel(
-        model_name=model_name,
-        system_instruction=system_instruction
-    )
     
-    # ── FORMAT HISTORY ──────────────────────────────────────────────────────
-    gemini_history = []
-    for m in messages[:-1]:
-        role = "user" if m["role"] == "user" else "model"
-        gemini_history.append({"role": role, "parts": [m["content"]]})
-    
-    # Ensure history starts with 'user' role
-    if gemini_history and gemini_history[0]["role"] == "model":
-        gemini_history.insert(0, {"role": "user", "parts": ["Hi, let's start."]})
-
-    user_input = messages[-1]["content"]
+    groq_messages = []
+    for i, m in enumerate(messages):
+        content = m["content"]
+        if i == len(messages) - 1 and m["role"] == "user":
+            content = (
+                "SYSTEM RULES:\n" + system_instruction + "\n\n"
+                "USER MESSAGE: " + content + "\n\n"
+                "CRITICAL FORMAT RULES:\n"
+                "- Your response MUST have exactly two sections separated by the marker.\n"
+                "- Section 1: Your conversational reply ONLY. No JSON here.\n"
+                "- Section 2: Extracted JSON ONLY. No text here.\n"
+                "- Use this EXACT format with no deviation:\n\n"
+                "REPLY:\n"
+                "<your reply here, no JSON>\n"
+                "EXTRACTED_JSON:\n"
+                "{\"Field\": \"value\"}\n\n"
+                "Fields to extract from USER MESSAGE only: "
+                "Full Name, Email Address, Phone Number, Current Location, "
+                "Years of Experience, Desired Position(s), Tech Stack.\n"
+                "If no new fields found, output: {}"
+            )
+        groq_messages.append({"role": m["role"], "content": content})
 
     try:
-        chat_session = model.start_chat(history=gemini_history)
-        response = chat_session.send_message(user_input)
-        return response.text
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=groq_messages,
+            max_tokens=1024,
+            temperature=0.7,
+        )
+        raw = response.choices[0].message.content
+        return _parse(raw)
     except Exception as e:
-        print(f"❌ ERROR WITH {model_name}: {e}")
-        
-        # SECOND CHANCE: Try 'gemini-flash-latest' which was also in your 'Found' list
-        try:
-            print("🔄 Trying fallback to gemini-flash-latest...")
-            fallback = genai.GenerativeModel("gemini-flash-latest", system_instruction=system_instruction)
-            res = fallback.generate_content(user_input)
-            return res.text
-        except:
-            return f"Final Connection Error. Please check terminal logs."
+        return f"⚠️ Error: {str(e)[:120]}", {}
+
+
+def _parse(raw):
+    reply, extracted = raw.strip(), {}
+    try:
+        if "EXTRACTED_JSON:" in raw:
+            # Split on the marker
+            parts = raw.split("EXTRACTED_JSON:", 1)
+            # Clean the reply part
+            reply = parts[0].replace("REPLY:", "").strip()
+            # Clean the JSON part
+            json_part = parts[1].strip()
+            json_part = re.sub(r"```json|```", "", json_part).strip()
+            # Extract only the first valid JSON object
+            json_match = re.search(r"\{.*?\}", json_part, re.DOTALL)
+            if json_match:
+                extracted = json.loads(json_match.group())
+        else:
+            # Fallback: strip any stray JSON from reply
+            json_match = re.search(r"\{[^{}]+\}", raw, re.DOTALL)
+            if json_match:
+                extracted = json.loads(json_match.group())
+                reply = raw[:json_match.start()].strip()
+    except Exception:
+        pass
+
+    # Final cleanup — remove any leaked markers from reply
+    reply = reply.replace("REPLY:", "").replace("EXTRACTED_JSON:", "").strip()
+    # Remove any trailing { that might have leaked
+    reply = re.sub(r"\{.*", "", reply, flags=re.DOTALL).strip()
+
+    return reply, extracted
+
+
+def extract_info(user_input, current_data):
+    return {}
