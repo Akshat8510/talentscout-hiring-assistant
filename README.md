@@ -26,7 +26,7 @@ TalentScout assists recruitment teams by:
     ```
 3.  **Environment Variables:**
     - Create a `.env` file from `.env.example`.
-    - Add your `GOOGLE_API_KEY` from [Google AI Studio](https://aistudio.google.com/).
+    - Add your `GGROQ_API_KEY` from GROQ 
 4.  **Run the app:**
     ```bash
     streamlit run app.py
